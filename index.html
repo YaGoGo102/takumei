@@ -23,38 +23,33 @@ export default {
       if (location) {
         return new Response(null, {
           status: response.status,
-          headers: { 'Location': location.replace(/www\.google\.com/g, originHost) }
+          headers: { 'Location': location.replace(new RegExp(targetHost, 'g'), originHost) }
         });
       }
     }
 
     const contentType = response.headers.get('content-type') || '';
-    let responseBody = await response.arrayBuffer();
+    
+    if (contentType.includes('text/html') || contentType.includes('text/css') || contentType.includes('javascript')) {
+      let body = await response.text();
+      
+      body = body.replace(new RegExp(`https://${targetHost}`, 'g'), `https://${originHost}`);
+      body = body.replace(new RegExp(`//${targetHost}`, 'g'), `//${originHost}`);
+      body = body.replace(/www\.gstatic\.com/g, originHost);
+      body = body.replace(/ssl\.gstatic\.com/g, originHost);
 
-    if (contentType.includes('text/html') || contentType.includes('text/css')) {
-      let text = new TextDecoder().decode(responseBody);
-      
-      // あらゆるGoogle関連ドメインを自分のURLにすり替える
-      text = text.replace(/www\.google\.com/g, originHost);
-      text = text.replace(/www\.gstatic\.com/g, originHost);
-      text = text.replace(/ssl\.gstatic\.com/g, originHost);
-      text = text.replace(/apis\.google\.com/g, originHost);
-      
       const newResponseHeaders = new Headers(response.headers);
       newResponseHeaders.delete('content-security-policy');
       newResponseHeaders.delete('content-security-policy-report-only');
       newResponseHeaders.delete('x-frame-options');
       newResponseHeaders.set('Access-Control-Allow-Origin', '*');
 
-      return new Response(text, {
+      return new Response(body, {
         status: response.status,
         headers: newResponseHeaders
       });
     }
 
-    return new Response(responseBody, {
-      status: response.status,
-      headers: response.headers
-    });
+    return response;
   },
 };
