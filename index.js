@@ -4,11 +4,12 @@ export default {
     const originHost = url.host; // takumei.goku-0102-gg.workers.dev
     const proxyPrefix = "/proxy/";
 
-    // 1. ターゲットの特定
+    // 1. 目的地を特定する
     let targetUrlString = "";
     if (url.pathname.startsWith(proxyPrefix)) {
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
+      // 最初はBingを表示
       targetUrlString = "https://www.bing.com" + url.pathname + url.search;
     }
 
@@ -16,11 +17,12 @@ export default {
       const targetUrl = new URL(targetUrlString);
       const targetHost = targetUrl.host;
 
+      // 2. リクエストの構築
       const newHeaders = new Headers(request.headers);
       newHeaders.set('Host', targetHost);
       newHeaders.set('Referer', targetUrl.origin);
-
-      // セーフサーチOFF
+      
+      // クッキー認証 ＆ セーフサーチOFFの統合
       let clientCookie = request.headers.get('Cookie') || '';
       const safeSearchOff = "SRCHHPGUSR=ADLT=OFF; PREF=SAFEUI=0; mkt=ja-jp; safe=off";
       newHeaders.set('Cookie', clientCookie ? `${clientCookie}; ${safeSearchOff}` : safeSearchOff);
@@ -32,9 +34,10 @@ export default {
         redirect: 'manual' 
       }));
 
+      // 3. 全てのレスポンスヘッダーを「自分名義」に書き換え
       const newResponseHeaders = new Headers(response.headers);
       
-      // Cookieのドメイン書き換え
+      // Cookieのドメインを自分のものに
       const setCookies = response.headers.getSetCookie();
       newResponseHeaders.delete('set-cookie');
       for (let cookie of setCookies) {
@@ -43,41 +46,49 @@ export default {
         newResponseHeaders.append('set-cookie', modifiedCookie);
       }
 
-      // 2. リダイレクト先を絶対にTakumeiドメインに固定
+      // リダイレクト先を絶対に自分のドメインに繋ぎ止める
       if ([301, 302, 307, 308].includes(response.status)) {
         let location = response.headers.get('Location');
         if (location) {
-          if (!location.startsWith('http')) {
-            location = new URL(location, targetUrl.origin).href;
-          }
-          return new Response(null, {
-            status: response.status,
-            headers: { 'Location': `https://${originHost}${proxyPrefix}${location}` }
-          });
+          const absoluteLoc = new URL(location, targetUrl.origin).href;
+          newResponseHeaders.set('Location', `https://${originHost}${proxyPrefix}${absoluteLoc}`);
         }
       }
 
       const contentType = response.headers.get('content-type') || '';
-      if (contentType.includes('text/html')) {
+
+      // 4. 【最強の置換】HTML / JS / CSS の中身を全て自分経由に書き換える
+      if (contentType.includes('text') || contentType.includes('javascript')) {
         let body = await response.text();
 
-        // --- URL固定の魔法（強化版） ---
-        
-        // ① https://... 形式をすべて置換
-        body = body.replace(/href="https?:\/\/([^"]+)"/g, (match, p1) => {
-          if (match.includes(originHost)) return match;
-          return `href="https://${originHost}${proxyPrefix}https://${p1}"`;
+        // サイト内のあらゆる「http(s)://」を「自分のURL/proxy/http(s)://」に書き換える
+        // これにより、JavaScript内の隠れたリンクも強制的に固定されます
+        body = body.replace(/https?:\/\/([a-zA-Z0-9.-]+\.[a-z]{2,})/g, (match) => {
+          if (match.includes(originHost)) return match; // 自分のドメインならそのまま
+          return `https://${originHost}${proxyPrefix}${match}`;
         });
 
-        // ② //example.com 形式（プロトコル相対）を置換
-        body = body.replace(/href="\/\/([^"]+)"/g, `href="https://${originHost}${proxyPrefix}https://$1"`);
+        // リンク(href)や画像(src)の相対パス「/foo/bar」も自分経由に
+        body = body.replace(/(href|src|action|data-url)="\/(?!\/)/g, `$1="https://${originHost}${proxyPrefix}${targetUrl.origin}/`);
 
-        // ③ /path/to... 形式（ルート相対）を置換
-        body = body.replace(/href="\/(?!\/)([^"]+)"/g, `href="https://${originHost}${proxyPrefix}${targetUrl.origin}/$1"`);
+        // 5. 【トドメ】ブラウザ上でもドメイン漏れを監視するスクリプトを注入
+        if (contentType.includes('text/html')) {
+          const injection = `
+            <script>
+              // リンククリック時に、もし書き換え漏れがあればその場で修正して飛ぶ
+              document.addEventListener('click', e => {
+                const a = e.target.closest('a');
+                if (a && a.href && !a.href.includes('${originHost}')) {
+                  e.preventDefault();
+                  window.location.href = "https://${originHost}${proxyPrefix}" + a.href;
+                }
+              }, true);
+            </script>
+          `;
+          body = body.replace('</body>', injection + '</body>');
+        }
 
-        // ついでに画像(src)も同様に書き換えると、デザインが崩れにくくなります
-        body = body.replace(/src="\/(?!\/)([^"]+)"/g, `src="https://${originHost}${proxyPrefix}${targetUrl.origin}/$1"`);
-
+        // セキュリティ制限を完全に解除
         newResponseHeaders.delete('content-security-policy');
         newResponseHeaders.delete('x-frame-options');
 
@@ -87,7 +98,7 @@ export default {
       return response;
 
     } catch (e) {
-      return new Response("中継エラー: " + e.message, { status: 400 });
+      return new Response("中継エラー: " + e.message, { status: 500 });
     }
   }
 };
