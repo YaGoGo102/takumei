@@ -3,25 +3,26 @@ export default {
     const url = new URL(request.url);
     const originHost = url.host;
 
-    // 1. ターゲットの決定
-    // URLのパラメータに「target」があればそれを使う、なければデフォルトをDuckDuckGoにする
-    let targetUrlString = url.searchParams.get('__target');
-    
-    if (!targetUrlString) {
-      // パラメータがない場合はDuckDuckGoへ
-      targetUrlString = `https://duckduckgo.com${url.pathname}${url.search}`;
+    // 1. 今どのサイトを表示すべきか判断する
+    // URLの末尾が /proxy/https://... という形式ならその先へ、そうでなければDuckDuckGoへ
+    let targetUrlString = "";
+    const proxyPrefix = "/proxy/";
+
+    if (url.pathname.startsWith(proxyPrefix)) {
+      targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
+    } else {
+      // 初期状態はDuckDuckGo
+      targetUrlString = "https://duckduckgo.com" + url.pathname + url.search;
     }
 
-    const targetUrl = new URL(targetUrlString);
-    const targetHost = targetUrl.host;
-
-    // 2. リクエストの準備
-    const newHeaders = new Headers(request.headers);
-    newHeaders.set('Host', targetHost);
-    newHeaders.set('Referer', `https://${targetHost}/`);
-    newHeaders.set('User-Agent', request.headers.get('User-Agent') || 'Mozilla/5.0');
-
     try {
+      const targetUrl = new URL(targetUrlString);
+      const targetHost = targetUrl.host;
+
+      const newHeaders = new Headers(request.headers);
+      newHeaders.set('Host', targetHost);
+      newHeaders.set('Referer', targetUrl.origin);
+
       const response = await fetch(new Request(targetUrl, {
         method: request.method,
         headers: newHeaders,
@@ -29,29 +30,20 @@ export default {
         redirect: 'manual'
       }));
 
-      // 3. リダイレクトの書き換え
-      if ([301, 302, 307, 308].includes(response.status)) {
-        const location = response.headers.get('Location');
-        if (location) {
-          const newLoc = new URL(location);
-          return new Response(null, {
-            status: response.status,
-            headers: { 'Location': `https://${originHost}${newLoc.pathname}${newLoc.search}${newLoc.search ? '&' : '?'}__target=${encodeURIComponent(newLoc.origin + newLoc.pathname + newLoc.search)}` }
-          });
-        }
-      }
-
       const contentType = response.headers.get('content-type') || '';
 
-      // 4. HTML内のリンクを「自分のURL + ターゲット指定」に書き換える
+      // 2. HTMLの中身を書き換えて「自分のドメイン」を固定する
       if (contentType.includes('text/html')) {
         let body = await response.text();
-        
-        // リンクを書き換えて、クリックしても自分のWorkersに戻ってくるようにする
-        // 仕組み：href="https://site.com" -> href="?__target=https://site.com"
-        body = body.replace(/href="https?:\/\/([^"]+)"/g, (match, p1) => {
+
+        // ページ内のすべての「https://...」というリンクを
+        // 「https://自分のドメイン/proxy/https://...」に書き換える
+        body = body.replace(/(href|src)="https?:\/\/([^"]+)"/g, (match, attr, p1) => {
+          // すでに自分のドメインなら書き換えない
+          if (match.includes(originHost)) return match;
+          
           const fullUrl = match.match(/https?:\/\/[^"]+/)[0];
-          return `href="?__target=${encodeURIComponent(fullUrl)}"`;
+          return `${attr}="https://${originHost}/proxy/${fullUrl}"`;
         });
 
         const newResponseHeaders = new Headers(response.headers);
@@ -64,10 +56,11 @@ export default {
         });
       }
 
+      // 画像などはそのまま中継
       return response;
 
     } catch (e) {
-      return new Response("閲覧エラー: " + e.message, { status: 500 });
+      return new Response("URL形式が正しくありません。 /proxy/https://... の形式でアクセスしてください。", { status: 400 });
     }
   }
 };
