@@ -8,7 +8,6 @@ export default {
     if (url.pathname.startsWith(proxyPrefix)) {
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
-      // 初期値はBing
       targetUrlString = "https://www.bing.com" + url.pathname + url.search;
     }
 
@@ -16,39 +15,63 @@ export default {
       const targetUrl = new URL(targetUrlString);
       const targetHost = targetUrl.host;
 
+      // 1. リクエストヘッダーの準備（ブラウザのCookieをターゲットに渡す）
       const newHeaders = new Headers(request.headers);
       newHeaders.set('Host', targetHost);
+      newHeaders.set('Referer', targetUrl.origin);
       
-      // 【重要】セーフサーチをオフにするための設定をCookieに仕込む
-      // Bingの場合、ADLT=OFF がセーフサーチオフを意味します
-      newHeaders.set('Cookie', 'SRCHHPGUSR=ADLT=OFF; PREF=SAFEUI=0');
-      
-      newHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+      // セーフサーチOFFの強制上書き
+      let cookie = request.headers.get('Cookie') || '';
+      if (!cookie.includes('ADLT=OFF')) {
+        cookie += '; SRCHHPGUSR=ADLT=OFF; PREF=SAFEUI=0';
+      }
+      newHeaders.set('Cookie', cookie);
 
       const response = await fetch(new Request(targetUrl, {
         method: request.method,
         headers: newHeaders,
-        redirect: 'manual'
+        body: request.body,
+        redirect: 'manual' 
       }));
 
-      // --- 以下、前回の「全URL固定」の処理を継続 ---
+      // 2. ログイン維持の鍵！レスポンスヘッダー（Cookie）の書き換え
+      const newResponseHeaders = new Headers(response.headers);
+      
+      // サイトから送られてきた「Set-Cookie」を、自分のドメイン用としてブラウザに保存させる
+      const setCookie = response.headers.get('set-cookie');
+      if (setCookie) {
+        // Cookieの有効範囲をターゲットドメインから「自分のWorkersドメイン」に書き換える
+        const modifiedCookie = setCookie.replace(new RegExp(targetHost, 'g'), originHost);
+        newResponseHeaders.set('set-cookie', modifiedCookie);
+      }
+
+      // 3. リダイレクトの書き換え
+      if ([301, 302, 307, 308].includes(response.status)) {
+        let location = response.headers.get('Location');
+        if (location) {
+          if (!location.startsWith('http')) {
+            location = new URL(location, targetUrl.origin).href;
+          }
+          newResponseHeaders.set('Location', `https://${originHost}${proxyPrefix}${location}`);
+        }
+      }
+
       const contentType = response.headers.get('content-type') || '';
-      if (contentType.includes('text/html')) {
+
+      // 4. HTML / JS のリンク書き換え
+      if (contentType.includes('text') || contentType.includes('javascript')) {
         let body = await response.text();
 
-        // 全URLの書き換え
+        // リンクと画像パスを自分経由に
         body = body.replace(/https?:\/\/([a-zA-Z0-9.-]+\.[a-z]{2,})/g, (match) => {
           if (match.includes(originHost)) return match;
           return `https://${originHost}${proxyPrefix}${match}`;
         });
 
-        // 相対パスの書き換え
         body = body.replace(/(href|src|action)="\/(?!\/)/g, `$1="https://${originHost}${proxyPrefix}${targetUrl.origin}/`);
 
-        const newResponseHeaders = new Headers(response.headers);
         newResponseHeaders.delete('content-security-policy');
         newResponseHeaders.delete('x-frame-options');
-        newResponseHeaders.set('Access-Control-Allow-Origin', '*');
 
         return new Response(body, {
           status: response.status,
