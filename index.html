@@ -1,7 +1,6 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-
     url.hostname = 'www.google.com';
 
     const newHeaders = new Headers(request.headers);
@@ -15,7 +14,18 @@ export default {
       redirect: 'follow'
     });
 
-    let response = await fetch(newRequest);
+    const response = await fetch(newRequest);
+    const contentType = response.headers.get('content-type') || '';
+
+    if (contentType.includes('text/html')) {
+      let body = await response.text();
+      const myHost = new URL(request.url).host;
+      body = body.replace(/www\.google\.com/g, myHost);
+      
+      return new Response(body, {
+        headers: response.headers
+      });
+    }
 
     return response;
   },
