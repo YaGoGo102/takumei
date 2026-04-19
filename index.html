@@ -2,33 +2,48 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const originHost = url.host;
-    url.hostname = 'www.google.com';
+    const targetHost = 'www.google.com';
+
+    url.hostname = targetHost;
 
     const newHeaders = new Headers(request.headers);
-    newHeaders.set('Host', 'www.google.com');
-    newHeaders.set('Referer', 'https://www.google.com/');
+    newHeaders.set('Host', targetHost);
+    newHeaders.set('Referer', `https://${targetHost}/`);
+    // Googleにボットだと疑われないようにブラウザのふりをする設定
+    newHeaders.set('User-Agent', request.headers.get('User-Agent'));
 
     const response = await fetch(new Request(url, {
       method: request.method,
       headers: newHeaders,
       body: request.body,
-      redirect: 'follow'
+      redirect: 'manual' // 自動リダイレクトを止めて自分で制御する
     }));
 
-    const contentType = response.headers.get('content-type') || '';
+    // リダイレクト（検索後の画面移動）が発生した場合の処理
+    if ([301, 302, 307, 308].includes(response.status)) {
+      const location = response.headers.get('Location');
+      if (location) {
+        const newLocation = location.replace(`https://${targetHost}`, `https://${originHost}`);
+        return ListResponse(new Response(null, {
+          status: response.status,
+          headers: { 'Location': newLocation }
+        }));
+      }
+    }
 
+    const contentType = response.headers.get('content-type') || '';
     if (contentType.includes('text/html')) {
       let body = await response.text();
-      body = body.replace(/www\.google\.com/g, originHost);
+      // ページ内のすべてのGoogleリンクを自分のURLに書き換える
+      body = body.replace(new RegExp(`https://${targetHost}`, 'g'), `https://${originHost}`);
+      body = body.replace(new RegExp(`//${targetHost}`, 'g'), `//${originHost}`);
       
       const newResponseHeaders = new Headers(response.headers);
       newResponseHeaders.delete('content-security-policy');
-      newResponseHeaders.delete('content-security-policy-report-only');
-      newResponseHeaders.delete('x-frame-options');
+      newResponseHeaders.set('Access-Control-Allow-Origin', '*');
 
       return new Response(body, {
         status: response.status,
-        statusText: response.statusText,
         headers: newResponseHeaders
       });
     }
