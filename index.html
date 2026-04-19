@@ -4,7 +4,6 @@ export default {
     const originHost = url.host;
     const targetHost = 'duckduckgo.com';
 
-    // どのパスへのアクセスも、一旦DuckDuckGo本体へ取りに行く設定
     url.hostname = targetHost;
 
     const newHeaders = new Headers(request.headers);
@@ -31,15 +30,13 @@ export default {
 
     const contentType = response.headers.get('content-type') || '';
 
-    // デザインや動きに関わるファイルの中身を書き換える
-    if (contentType.includes('text') || contentType.includes('javascript') || contentType.includes('json')) {
+    // HTML、CSS、JSなどの「テキストデータ」だけを書き換える
+    if (contentType.includes('text/html') || contentType.includes('application/x-javascript') || contentType.includes('text/css')) {
       let body = await response.text();
       
-      // DuckDuckGoのドメインをすべて自分のURLにすり替える
       body = body.replace(/duckduckgo\.com/g, originHost);
       body = body.replace(/icons\.duckduckgo\.com/g, originHost);
-      body = body.replace(/external-content\.duckduckgo\.com/g, originHost);
-
+      
       const newResponseHeaders = new Headers(response.headers);
       newResponseHeaders.delete('content-security-policy');
       newResponseHeaders.delete('x-frame-options');
@@ -51,7 +48,7 @@ export default {
       });
     }
 
-    // 画像、フォント、アイコンなどはそのままバイナリとして返す
+    // 画像やフォントなどは、中身をいじらずそのままブラウザに流す
     return response;
   },
 };
