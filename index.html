@@ -3,7 +3,8 @@ export default {
     const url = new URL(request.url);
     const originHost = url.host;
     const targetHost = 'www.google.com';
-    
+
+    // 1. 画像やCSSの読み込み先が「自分のドメイン」に来た場合、Googleへ飛ばす
     url.hostname = targetHost;
 
     const newHeaders = new Headers(request.headers);
@@ -18,9 +19,6 @@ export default {
       redirect: 'manual'
     }));
 
-    const contentType = response.headers.get('content-type') || '';
-    
-    // 300番台のリダイレクト処理
     if ([301, 302, 307, 308].includes(response.status)) {
       const location = response.headers.get('Location');
       if (location) {
@@ -31,22 +29,22 @@ export default {
       }
     }
 
-    // HTML、CSS、JSのすべてを書き換え対象にする
+    const contentType = response.headers.get('content-type') || '';
+
+    // 2. HTML、CSS、JavaScriptの中身を書き換えて自分を経由させる
     if (contentType.includes('text') || contentType.includes('javascript')) {
       let text = await response.text();
       
-      // ドメインの全置換
+      // あらゆるGoogle関連ドメインを自分のURLに向ける
       text = text.replace(/www\.google\.com/g, originHost);
       text = text.replace(/www\.gstatic\.com/g, originHost);
       text = text.replace(/ssl\.gstatic\.com/g, originHost);
       text = text.replace(/apis\.google\.com/g, originHost);
       
-      // セキュリティヘッダーを完全に削除・上書き
       const newResponseHeaders = new Headers(response.headers);
       newResponseHeaders.delete('content-security-policy');
       newResponseHeaders.delete('content-security-policy-report-only');
       newResponseHeaders.delete('x-frame-options');
-      newResponseHeaders.delete('x-content-type-options');
       newResponseHeaders.set('Access-Control-Allow-Origin', '*');
 
       return new Response(text, {
@@ -55,7 +53,7 @@ export default {
       });
     }
 
-    // 画像などのバイナリデータはそのまま返す
+    // 3. 画像やデザインファイルそのものをGoogleから返送する
     return response;
   },
 };
