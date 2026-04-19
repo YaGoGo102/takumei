@@ -1,13 +1,22 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    
+
     url.hostname = 'www.google.com';
-    
-    let newRequest = new Request(url, request);
-    
+
+    const newHeaders = new Headers(request.headers);
+    newHeaders.set('Host', 'www.google.com');
+    newHeaders.set('Referer', 'https://www.google.com/');
+
+    const newRequest = new Request(url, {
+      method: request.method,
+      headers: newHeaders,
+      body: request.body,
+      redirect: 'follow'
+    });
+
     let response = await fetch(newRequest);
-    
+
     return response;
   },
 };
