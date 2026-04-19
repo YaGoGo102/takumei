@@ -2,16 +2,12 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     
-    // 自分のURLへのアクセスを、すべてGoogleへ転送するように書き換える
     url.hostname = 'www.google.com';
     
-    // 元のリクエストをコピーしつつ、宛先をGoogleに変更して送信
     let newRequest = new Request(url, request);
     
-    // Googleからの返答を受け取る
     let response = await fetch(newRequest);
     
-    // 返答をそのまま自分のサイトの結果として返す
     return response;
   },
 };
