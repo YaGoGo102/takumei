@@ -4,12 +4,11 @@ export default {
     const originHost = url.host;
     const proxyPrefix = "/proxy/";
 
-    // 1. ターゲットURLの決定
+    // 1. ターゲットURLの決定（/proxy/以降があればそこへ、なければBingへ）
     let targetUrlString = "";
     if (url.pathname.startsWith(proxyPrefix)) {
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
-      // 初期値（Bing）
       targetUrlString = "https://www.bing.com" + url.pathname + url.search;
     }
 
@@ -17,16 +16,16 @@ export default {
       const targetUrl = new URL(targetUrlString);
       const targetHost = targetUrl.host;
 
-      // 2. リクエストヘッダーの構築
+      // 2. リクエストヘッダーの準備
       const newHeaders = new Headers(request.headers);
       newHeaders.set('Host', targetHost);
       newHeaders.set('Referer', targetUrl.origin);
 
-      // --- セーフサーチOFFの強制注入 ---
+      // --- セーフサーチOFF & 認証クッキーの統合 ---
       let clientCookie = request.headers.get('Cookie') || '';
-      // 各検索エンジンのOFF設定クッキーを合体させる
-      const safeSearchOffCookies = "SRCHHPGUSR=ADLT=OFF; PREF=SAFEUI=0; mkt=ja-jp; safe=off";
-      newHeaders.set('Cookie', clientCookie ? `${clientCookie}; ${safeSearchOffCookies}` : safeSearchOffCookies);
+      // 検索エンジンへの「制限オフ」命令を追加
+      const safeSearchOff = "SRCHHPGUSR=ADLT=OFF; PREF=SAFEUI=0; mkt=ja-jp; safe=off";
+      newHeaders.set('Cookie', clientCookie ? `${clientCookie}; ${safeSearchOff}` : safeSearchOff);
 
       const response = await fetch(new Request(targetUrl, {
         method: request.method,
@@ -35,35 +34,49 @@ export default {
         redirect: 'manual' 
       }));
 
-      // 3. レスポンスヘッダー（クッキー）の自分のドメインへの書き換え
+      // 3. レスポンスヘッダー（クッキーとリダイレクト）の書き換え
       const newResponseHeaders = new Headers(response.headers);
-      const setCookies = response.headers.getSetCookie(); // 全てのクッキーを取得
       
-      newResponseHeaders.delete('set-cookie'); // 一度消して再構築
+      // サイトからのCookieを自分のドメイン用に「名義変更」する
+      const setCookies = response.headers.getSetCookie();
+      newResponseHeaders.delete('set-cookie');
       for (let cookie of setCookies) {
-        // クッキーの通用ドメインを「相手のドメイン」から「自分のドメイン」へ書き換え
         let modifiedCookie = cookie.replace(new RegExp(targetHost, 'g'), originHost);
-        // セキュア設定などで弾かれないよう調整
-        modifiedCookie = modifiedCookie.replace(/Domain=[^;]+;?/i, ''); 
+        // ドメイン属性を削除して自分のWorkersドメインで強制保存させる
+        modifiedCookie = modifiedCookie.replace(/Domain=[^;]+;?/i, '');
         newResponseHeaders.append('set-cookie', modifiedCookie);
       }
 
-      // 4. HTMLの書き換え（URL固定）
+      // リダイレクト先もプロキシ経由に固定
+      if ([301, 302, 307, 308].includes(response.status)) {
+        let location = response.headers.get('Location');
+        if (location) {
+          if (!location.startsWith('http')) {
+            location = new URL(location, targetUrl.origin).href;
+          }
+          newResponseHeaders.set('Location', `https://${originHost}${proxyPrefix}${location}`);
+        }
+      }
+
       const contentType = response.headers.get('content-type') || '';
+
+      // 4. HTMLの中身を「全URL固定」に書き換え
       if (contentType.includes('text/html')) {
         let body = await response.text();
 
-        // ページ内の絶対URLを自分経由に
+        // ページ内の絶対リンクを書き換え
         body = body.replace(/href="https?:\/\/([^"]+)"/g, (match) => {
           if (match.includes(originHost)) return match;
           const fullUrl = match.match(/https?:\/\/[^"]+/)[0];
           return `href="https://${originHost}${proxyPrefix}${fullUrl}"`;
         });
 
-        // 相対パスを自分経由の絶対パスに
-        body = body.replace(/(href|src|action)="\/(?!\/)/g, `$1="https://${originHost}${proxyPrefix}${targetUrl.origin}/`);
+        // ページ内の相対リンクも書き換え
+        body = body.replace(/href="\/(?!\/)([^"]+)"/g, (match, p1) => {
+          return `href="https://${originHost}${proxyPrefix}${targetUrl.origin}/${p1}"`;
+        });
 
-        // セキュリティ制限を解除
+        // セキュリティ制限（CSPなど）を解除して、外部コンテンツの読み込みを許可
         newResponseHeaders.delete('content-security-policy');
         newResponseHeaders.delete('x-frame-options');
 
@@ -73,7 +86,7 @@ export default {
       return response;
 
     } catch (e) {
-      return new Response("プロキシエラー: " + e.message, { status: 400 });
+      return new Response("中継エラー: " + e.message, { status: 400 });
     }
   }
 };
