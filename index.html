@@ -2,12 +2,9 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const originHost = url.host;
-
-    // 検索ワードがある場合や初期アクセス時はGoogleを、それ以外はパスから判断
-    let targetHost = 'www.google.com';
     
-    // クエリパラメータや特定のパスでターゲットを切り替える高度な処理も可能ですが、
-    // まずはGoogle内での検索・閲覧を安定させます。
+    // 常にGoogleをターゲットにする
+    const targetHost = 'www.google.com';
     url.hostname = targetHost;
 
     const newHeaders = new Headers(request.headers);
@@ -22,13 +19,11 @@ export default {
       redirect: 'manual'
     }));
 
-    const contentType = response.headers.get('content-type') || '';
-
-    // リダイレクト（検索後の移動）を自分のドメインに書き換え
+    // リダイレクト（検索後の移動）の書き換え
     if ([301, 302, 307, 308].includes(response.status)) {
       const location = response.headers.get('Location');
       if (location) {
-        const newLocation = location.replace(/https?:\/\/[^\/]+/, `https://${originHost}`);
+        const newLocation = location.replace(/https?:\/\/(www\.)?google\.[a-z.]+/g, `https://${originHost}`);
         return new Response(null, {
           status: response.status,
           headers: { 'Location': newLocation }
@@ -36,14 +31,16 @@ export default {
       }
     }
 
-    if (contentType.includes('text/html')) {
+    const contentType = response.headers.get('content-type') || '';
+
+    // HTML、CSS、JSをすべて書き換え対象にする
+    if (contentType.includes('text') || contentType.includes('javascript')) {
       let body = await response.text();
       
-      // ページ内のすべての絶対パスリンクを自分のURLに書き換え
-      body = body.replace(/https?:\/\/(www\.)?google\.[a-z.]+/g, `https://${originHost}`);
-      // デザイン崩れ対策：gstaticなども中継対象に含める
-      body = body.replace(/https?:\/\/([a-z0-9.-]+\.gstatic\.com)/g, `https://${originHost}`);
-
+      // あらゆるGoogle関連ドメイン（www, gstatic, apis等）を自分のドメインに置換
+      body = body.replace(/https?:\/\/([a-z0-9.-]+\.)?google\.[a-z.]+/g, `https://${originHost}`);
+      body = body.replace(/https?:\/\/([a-z0-9.-]+\.)?gstatic\.com/g, `https://${originHost}`);
+      
       const newResponseHeaders = new Headers(response.headers);
       newResponseHeaders.delete('content-security-policy');
       newResponseHeaders.delete('x-frame-options');
@@ -55,6 +52,7 @@ export default {
       });
     }
 
+    // 画像などのデータはそのまま中継して返す
     return response;
   },
 };
