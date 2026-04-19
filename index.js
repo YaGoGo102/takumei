@@ -2,19 +2,24 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const originHost = url.host;
+
+    // 1. ターゲットの決定
+    // URLのパラメータに「target」があればそれを使う、なければデフォルトをDuckDuckGoにする
+    let targetUrlString = url.searchParams.get('__target');
     
-    // 表示したいサイトのドメインをここに固定する
-    // 例: 'discord.com' や 'wikipedia.org'
-    const targetHost = 'discord.com'; 
+    if (!targetUrlString) {
+      // パラメータがない場合はDuckDuckGoへ
+      targetUrlString = `https://duckduckgo.com${url.pathname}${url.search}`;
+    }
 
-    // ブラウザからのリクエストをターゲットドメインに書き換え
-    const targetUrl = new URL(url.pathname + url.search, `https://${targetHost}`);
+    const targetUrl = new URL(targetUrlString);
+    const targetHost = targetUrl.host;
 
+    // 2. リクエストの準備
     const newHeaders = new Headers(request.headers);
     newHeaders.set('Host', targetHost);
     newHeaders.set('Referer', `https://${targetHost}/`);
-    // 拒否されないよう、一般的なブラウザのUser-Agentをセット
-    newHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    newHeaders.set('User-Agent', request.headers.get('User-Agent') || 'Mozilla/5.0');
 
     try {
       const response = await fetch(new Request(targetUrl, {
@@ -24,32 +29,34 @@ export default {
         redirect: 'manual'
       }));
 
-      // リダイレクトが発生した際のURL書き換え
+      // 3. リダイレクトの書き換え
       if ([301, 302, 307, 308].includes(response.status)) {
         const location = response.headers.get('Location');
         if (location) {
+          const newLoc = new URL(location);
           return new Response(null, {
             status: response.status,
-            headers: { 'Location': location.replace(new RegExp(`https?://${targetHost}`, 'g'), `https://${originHost}`) }
+            headers: { 'Location': `https://${originHost}${newLoc.pathname}${newLoc.search}${newLoc.search ? '&' : '?'}__target=${encodeURIComponent(newLoc.origin + newLoc.pathname + newLoc.search)}` }
           });
         }
       }
 
       const contentType = response.headers.get('content-type') || '';
 
-      // HTML/CSS/JSの中にあるターゲットドメインを自分のドメインに全て置換
-      if (contentType.includes('text') || contentType.includes('javascript')) {
+      // 4. HTML内のリンクを「自分のURL + ターゲット指定」に書き換える
+      if (contentType.includes('text/html')) {
         let body = await response.text();
         
-        // 文字列置換で「discord.com」を「あなたのWorkersのURL」に変える
-        const re = new RegExp(targetHost, 'g');
-        body = body.replace(re, originHost);
+        // リンクを書き換えて、クリックしても自分のWorkersに戻ってくるようにする
+        // 仕組み：href="https://site.com" -> href="?__target=https://site.com"
+        body = body.replace(/href="https?:\/\/([^"]+)"/g, (match, p1) => {
+          const fullUrl = match.match(/https?:\/\/[^"]+/)[0];
+          return `href="?__target=${encodeURIComponent(fullUrl)}"`;
+        });
 
         const newResponseHeaders = new Headers(response.headers);
-        // セキュリティ制限を解除
         newResponseHeaders.delete('content-security-policy');
         newResponseHeaders.delete('x-frame-options');
-        newResponseHeaders.set('Access-Control-Allow-Origin', '*');
 
         return new Response(body, {
           status: response.status,
@@ -60,7 +67,7 @@ export default {
       return response;
 
     } catch (e) {
-      return new Response("Proxy Error: " + e.message, { status: 500 });
+      return new Response("閲覧エラー: " + e.message, { status: 500 });
     }
   }
 };
