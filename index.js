@@ -2,18 +2,19 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const originHost = url.host;
-    const targetHost = 'duckduckgo.com';
+    
+    // 表示したいサイトのドメインをここに固定する
+    // 例: 'discord.com' や 'wikipedia.org'
+    const targetHost = 'discord.com'; 
 
-    // 404を避けるため、リクエスト先のURLをDuckDuckGoのものに完全に作り直す
-    const targetUrl = new URL(request.url);
-    targetUrl.hostname = targetHost;
-    targetUrl.protocol = 'https:';
+    // ブラウザからのリクエストをターゲットドメインに書き換え
+    const targetUrl = new URL(url.pathname + url.search, `https://${targetHost}`);
 
     const newHeaders = new Headers(request.headers);
     newHeaders.set('Host', targetHost);
     newHeaders.set('Referer', `https://${targetHost}/`);
-    // ブラウザのふりをして拒否を防ぐ
-    newHeaders.set('User-Agent', request.headers.get('User-Agent'));
+    // 拒否されないよう、一般的なブラウザのUser-Agentをセット
+    newHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
     try {
       const response = await fetch(new Request(targetUrl, {
@@ -23,29 +24,29 @@ export default {
         redirect: 'manual'
       }));
 
-      // リダイレクト（検索後の移動）が発生した場合の処理
+      // リダイレクトが発生した際のURL書き換え
       if ([301, 302, 307, 308].includes(response.status)) {
         const location = response.headers.get('Location');
         if (location) {
-          const newLocation = location.replace(/duckduckgo\.com/g, originHost);
           return new Response(null, {
             status: response.status,
-            headers: { 'Location': newLocation }
+            headers: { 'Location': location.replace(new RegExp(`https?://${targetHost}`, 'g'), `https://${originHost}`) }
           });
         }
       }
 
       const contentType = response.headers.get('content-type') || '';
 
-      // HTML、CSS、JSの中身を書き換えて自分のドメインを維持する
-      if (contentType.includes('text/html') || contentType.includes('text/css') || contentType.includes('javascript')) {
+      // HTML/CSS/JSの中にあるターゲットドメインを自分のドメインに全て置換
+      if (contentType.includes('text') || contentType.includes('javascript')) {
         let body = await response.text();
         
-        // ページ内のすべてのDuckDuckGoドメインを自分のWorkersドメインに置換
-        body = body.replace(/duckduckgo\.com/g, originHost);
+        // 文字列置換で「discord.com」を「あなたのWorkersのURL」に変える
+        const re = new RegExp(targetHost, 'g');
+        body = body.replace(re, originHost);
 
         const newResponseHeaders = new Headers(response.headers);
-        // セキュリティ制限（CSP）を削除して、デザインや画像が表示されるようにする
+        // セキュリティ制限を解除
         newResponseHeaders.delete('content-security-policy');
         newResponseHeaders.delete('x-frame-options');
         newResponseHeaders.set('Access-Control-Allow-Origin', '*');
@@ -56,12 +57,10 @@ export default {
         });
       }
 
-      // 画像などのバイナリデータは、加工せずにそのままブラウザへ流す
       return response;
 
     } catch (e) {
-      // 万が一エラーが起きた場合に、原因を画面に表示させる
-      return new Response("Workers中継エラー: " + e.message, { status: 500 });
+      return new Response("Proxy Error: " + e.message, { status: 500 });
     }
-  },
+  }
 };
