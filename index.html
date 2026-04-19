@@ -2,9 +2,12 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const originHost = url.host;
-    const targetHost = 'www.google.com';
 
-    // 1. 画像やCSSの読み込み先が「自分のドメイン」に来た場合、Googleへ飛ばす
+    // 検索ワードがある場合や初期アクセス時はGoogleを、それ以外はパスから判断
+    let targetHost = 'www.google.com';
+    
+    // クエリパラメータや特定のパスでターゲットを切り替える高度な処理も可能ですが、
+    // まずはGoogle内での検索・閲覧を安定させます。
     url.hostname = targetHost;
 
     const newHeaders = new Headers(request.headers);
@@ -19,41 +22,39 @@ export default {
       redirect: 'manual'
     }));
 
+    const contentType = response.headers.get('content-type') || '';
+
+    // リダイレクト（検索後の移動）を自分のドメインに書き換え
     if ([301, 302, 307, 308].includes(response.status)) {
       const location = response.headers.get('Location');
       if (location) {
+        const newLocation = location.replace(/https?:\/\/[^\/]+/, `https://${originHost}`);
         return new Response(null, {
           status: response.status,
-          headers: { 'Location': location.replace(/www\.google\.com/g, originHost) }
+          headers: { 'Location': newLocation }
         });
       }
     }
 
-    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) {
+      let body = await response.text();
+      
+      // ページ内のすべての絶対パスリンクを自分のURLに書き換え
+      body = body.replace(/https?:\/\/(www\.)?google\.[a-z.]+/g, `https://${originHost}`);
+      // デザイン崩れ対策：gstaticなども中継対象に含める
+      body = body.replace(/https?:\/\/([a-z0-9.-]+\.gstatic\.com)/g, `https://${originHost}`);
 
-    // 2. HTML、CSS、JavaScriptの中身を書き換えて自分を経由させる
-    if (contentType.includes('text') || contentType.includes('javascript')) {
-      let text = await response.text();
-      
-      // あらゆるGoogle関連ドメインを自分のURLに向ける
-      text = text.replace(/www\.google\.com/g, originHost);
-      text = text.replace(/www\.gstatic\.com/g, originHost);
-      text = text.replace(/ssl\.gstatic\.com/g, originHost);
-      text = text.replace(/apis\.google\.com/g, originHost);
-      
       const newResponseHeaders = new Headers(response.headers);
       newResponseHeaders.delete('content-security-policy');
-      newResponseHeaders.delete('content-security-policy-report-only');
       newResponseHeaders.delete('x-frame-options');
       newResponseHeaders.set('Access-Control-Allow-Origin', '*');
 
-      return new Response(text, {
+      return new Response(body, {
         status: response.status,
         headers: newResponseHeaders
       });
     }
 
-    // 3. 画像やデザインファイルそのものをGoogleから返送する
     return response;
   },
 };
