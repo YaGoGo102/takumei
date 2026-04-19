@@ -3,8 +3,8 @@ export default {
     const url = new URL(request.url);
     const originHost = url.host;
     
-    // 常にGoogleをターゲットにする
-    const targetHost = 'www.google.com';
+    // ターゲットをDuckDuckGoに設定
+    const targetHost = 'duckduckgo.com';
     url.hostname = targetHost;
 
     const newHeaders = new Headers(request.headers);
@@ -19,11 +19,11 @@ export default {
       redirect: 'manual'
     }));
 
-    // リダイレクト（検索後の移動）の書き換え
+    // リダイレクト（検索後の画面移動）の制御
     if ([301, 302, 307, 308].includes(response.status)) {
       const location = response.headers.get('Location');
       if (location) {
-        const newLocation = location.replace(/https?:\/\/(www\.)?google\.[a-z.]+/g, `https://${originHost}`);
+        const newLocation = location.replace(/https?:\/\/duckduckgo\.com/g, `https://${originHost}`);
         return new Response(null, {
           status: response.status,
           headers: { 'Location': newLocation }
@@ -33,15 +33,17 @@ export default {
 
     const contentType = response.headers.get('content-type') || '';
 
-    // HTML、CSS、JSをすべて書き換え対象にする
+    // HTML、CSS、JSの中身をすべて自分のURLに書き換える
     if (contentType.includes('text') || contentType.includes('javascript')) {
       let body = await response.text();
       
-      // あらゆるGoogle関連ドメイン（www, gstatic, apis等）を自分のドメインに置換
-      body = body.replace(/https?:\/\/([a-z0-9.-]+\.)?google\.[a-z.]+/g, `https://${originHost}`);
-      body = body.replace(/https?:\/\/([a-z0-9.-]+\.)?gstatic\.com/g, `https://${originHost}`);
-      
+      // DuckDuckGoのリンクや資産をすべて自分のドメインに書き換える
+      body = body.replace(/duckduckgo\.com/g, originHost);
+      body = body.replace(/icons\.duckduckgo\.com/g, originHost);
+      body = body.replace(/external-content\.duckduckgo\.com/g, originHost);
+
       const newResponseHeaders = new Headers(response.headers);
+      // セキュリティ制限を解除してデザインが表示されるようにする
       newResponseHeaders.delete('content-security-policy');
       newResponseHeaders.delete('x-frame-options');
       newResponseHeaders.set('Access-Control-Allow-Origin', '*');
@@ -52,7 +54,7 @@ export default {
       });
     }
 
-    // 画像などのデータはそのまま中継して返す
+    // 画像やフォントなどのデータはそのまま中継
     return response;
   },
 };
