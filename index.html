@@ -18,38 +18,44 @@ export default {
       redirect: 'manual'
     }));
 
+    const contentType = response.headers.get('content-type') || '';
+    
+    // 300番台のリダイレクト処理
     if ([301, 302, 307, 308].includes(response.status)) {
       const location = response.headers.get('Location');
       if (location) {
         return new Response(null, {
           status: response.status,
-          headers: { 'Location': location.replace(new RegExp(targetHost, 'g'), originHost) }
+          headers: { 'Location': location.replace(/www\.google\.com/g, originHost) }
         });
       }
     }
 
-    const contentType = response.headers.get('content-type') || '';
-    
-    if (contentType.includes('text/html') || contentType.includes('text/css') || contentType.includes('javascript')) {
-      let body = await response.text();
+    // HTML、CSS、JSのすべてを書き換え対象にする
+    if (contentType.includes('text') || contentType.includes('javascript')) {
+      let text = await response.text();
       
-      body = body.replace(new RegExp(`https://${targetHost}`, 'g'), `https://${originHost}`);
-      body = body.replace(new RegExp(`//${targetHost}`, 'g'), `//${originHost}`);
-      body = body.replace(/www\.gstatic\.com/g, originHost);
-      body = body.replace(/ssl\.gstatic\.com/g, originHost);
-
+      // ドメインの全置換
+      text = text.replace(/www\.google\.com/g, originHost);
+      text = text.replace(/www\.gstatic\.com/g, originHost);
+      text = text.replace(/ssl\.gstatic\.com/g, originHost);
+      text = text.replace(/apis\.google\.com/g, originHost);
+      
+      // セキュリティヘッダーを完全に削除・上書き
       const newResponseHeaders = new Headers(response.headers);
       newResponseHeaders.delete('content-security-policy');
       newResponseHeaders.delete('content-security-policy-report-only');
       newResponseHeaders.delete('x-frame-options');
+      newResponseHeaders.delete('x-content-type-options');
       newResponseHeaders.set('Access-Control-Allow-Origin', '*');
 
-      return new Response(body, {
+      return new Response(text, {
         status: response.status,
         headers: newResponseHeaders
       });
     }
 
+    // 画像などのバイナリデータはそのまま返す
     return response;
   },
 };
