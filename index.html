@@ -1,29 +1,35 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const originHost = url.host;
     url.hostname = 'www.google.com';
 
     const newHeaders = new Headers(request.headers);
     newHeaders.set('Host', 'www.google.com');
     newHeaders.set('Referer', 'https://www.google.com/');
 
-    const newRequest = new Request(url, {
+    const response = await fetch(new Request(url, {
       method: request.method,
       headers: newHeaders,
       body: request.body,
       redirect: 'follow'
-    });
+    }));
 
-    const response = await fetch(newRequest);
     const contentType = response.headers.get('content-type') || '';
 
     if (contentType.includes('text/html')) {
       let body = await response.text();
-      const myHost = new URL(request.url).host;
-      body = body.replace(/www\.google\.com/g, myHost);
+      body = body.replace(/www\.google\.com/g, originHost);
       
+      const newResponseHeaders = new Headers(response.headers);
+      newResponseHeaders.delete('content-security-policy');
+      newResponseHeaders.delete('content-security-policy-report-only');
+      newResponseHeaders.delete('x-frame-options');
+
       return new Response(body, {
-        headers: response.headers
+        status: response.status,
+        statusText: response.statusText,
+        headers: newResponseHeaders
       });
     }
 
