@@ -3,7 +3,7 @@ export default {
     const url = new URL(request.url);
     const originHost = url.host;
     const targetHost = 'www.google.com';
-
+    
     url.hostname = targetHost;
 
     const newHeaders = new Headers(request.headers);
@@ -21,30 +21,40 @@ export default {
     if ([301, 302, 307, 308].includes(response.status)) {
       const location = response.headers.get('Location');
       if (location) {
-        const newLocation = location.replace(`https://${targetHost}`, `https://${originHost}`);
         return new Response(null, {
           status: response.status,
-          headers: { 'Location': newLocation }
+          headers: { 'Location': location.replace(/www\.google\.com/g, originHost) }
         });
       }
     }
 
     const contentType = response.headers.get('content-type') || '';
-    if (contentType.includes('text/html')) {
-      let body = await response.text();
-      body = body.replace(new RegExp(`https://${targetHost}`, 'g'), `https://${originHost}`);
-      body = body.replace(new RegExp(`//${targetHost}`, 'g'), `//${originHost}`);
+    let responseBody = await response.arrayBuffer();
+
+    if (contentType.includes('text/html') || contentType.includes('text/css')) {
+      let text = new TextDecoder().decode(responseBody);
+      
+      // あらゆるGoogle関連ドメインを自分のURLにすり替える
+      text = text.replace(/www\.google\.com/g, originHost);
+      text = text.replace(/www\.gstatic\.com/g, originHost);
+      text = text.replace(/ssl\.gstatic\.com/g, originHost);
+      text = text.replace(/apis\.google\.com/g, originHost);
       
       const newResponseHeaders = new Headers(response.headers);
       newResponseHeaders.delete('content-security-policy');
+      newResponseHeaders.delete('content-security-policy-report-only');
+      newResponseHeaders.delete('x-frame-options');
       newResponseHeaders.set('Access-Control-Allow-Origin', '*');
 
-      return new Response(body, {
+      return new Response(text, {
         status: response.status,
         headers: newResponseHeaders
       });
     }
 
-    return response;
+    return new Response(responseBody, {
+      status: response.status,
+      headers: response.headers
+    });
   },
 };
