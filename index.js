@@ -13,76 +13,64 @@ export default {
 
     try {
       const targetUrl = new URL(targetUrlString);
-      const targetHost = targetUrl.host;
-
-      // 1. リクエストヘッダーの準備（ブラウザのCookieをターゲットに渡す）
-      const newHeaders = new Headers(request.headers);
-      newHeaders.set('Host', targetHost);
-      newHeaders.set('Referer', targetUrl.origin);
-      
-      // セーフサーチOFFの強制上書き
-      let cookie = request.headers.get('Cookie') || '';
-      if (!cookie.includes('ADLT=OFF')) {
-        cookie += '; SRCHHPGUSR=ADLT=OFF; PREF=SAFEUI=0';
-      }
-      newHeaders.set('Cookie', cookie);
-
       const response = await fetch(new Request(targetUrl, {
         method: request.method,
-        headers: newHeaders,
-        body: request.body,
-        redirect: 'manual' 
+        headers: new Headers(request.headers),
+        redirect: 'manual'
       }));
 
-      // 2. ログイン維持の鍵！レスポンスヘッダー（Cookie）の書き換え
       const newResponseHeaders = new Headers(response.headers);
-      
-      // サイトから送られてきた「Set-Cookie」を、自分のドメイン用としてブラウザに保存させる
-      const setCookie = response.headers.get('set-cookie');
-      if (setCookie) {
-        // Cookieの有効範囲をターゲットドメインから「自分のWorkersドメイン」に書き換える
-        const modifiedCookie = setCookie.replace(new RegExp(targetHost, 'g'), originHost);
-        newResponseHeaders.set('set-cookie', modifiedCookie);
-      }
-
-      // 3. リダイレクトの書き換え
-      if ([301, 302, 307, 308].includes(response.status)) {
-        let location = response.headers.get('Location');
-        if (location) {
-          if (!location.startsWith('http')) {
-            location = new URL(location, targetUrl.origin).href;
-          }
-          newResponseHeaders.set('Location', `https://${originHost}${proxyPrefix}${location}`);
-        }
-      }
-
       const contentType = response.headers.get('content-type') || '';
 
-      // 4. HTML / JS のリンク書き換え
-      if (contentType.includes('text') || contentType.includes('javascript')) {
+      if (contentType.includes('text/html')) {
         let body = await response.text();
 
-        // リンクと画像パスを自分経由に
-        body = body.replace(/https?:\/\/([a-zA-Z0-9.-]+\.[a-z]{2,})/g, (match) => {
+        // 【修正1】リンクの書き換え ＋ 新しいタブ禁止
+        // target="_blank" を target="_self"（同じタブ）に強制変更
+        body = body.replace(/href="https?:\/\/([^"]+)"/g, (match) => {
           if (match.includes(originHost)) return match;
-          return `https://${originHost}${proxyPrefix}${match}`;
+          const fullUrl = match.match(/https?:\/\/[^"]+/)[0];
+          return `href="https://${originHost}${proxyPrefix}${fullUrl}" target="_self"`;
         });
 
-        body = body.replace(/(href|src|action)="\/(?!\/)/g, `$1="https://${originHost}${proxyPrefix}${targetUrl.origin}/`);
+        // 【修正2】相対パスも同じタブで開くように強制
+        body = body.replace(/href="\/(?!\/)([^"]+)"/g, (match, p1) => {
+          return `href="https://${originHost}${proxyPrefix}${targetUrl.origin}/${p1}" target="_self"`;
+        });
+
+        // 【修正3】JavaScriptでの「新しいウィンドウ」を封じる
+        // ページの最後に、動作を上書きするスクリプトを流し込む
+        const injectionScript = `
+          <script>
+            // リンククリック時に新しいタブで開くのを阻止
+            document.addEventListener('click', function(e) {
+              const target = e.target.closest('a');
+              if (target && target.target === '_blank') {
+                target.target = '_self';
+              }
+            }, true);
+            // window.open を自分のプロキシ経由に書き換える
+            const originalOpen = window.open;
+            window.open = function(url, name, specs) {
+              if (url && !url.includes('${originHost}')) {
+                const proxyUrl = "https://${originHost}${proxyPrefix}" + new URL(url, window.location.href).href;
+                return originalOpen(proxyUrl, '_self', specs);
+              }
+              return originalOpen(url, '_self', specs);
+            };
+          </script>
+        `;
+        body = body.replace('</body>', injectionScript + '</body>');
 
         newResponseHeaders.delete('content-security-policy');
         newResponseHeaders.delete('x-frame-options');
 
-        return new Response(body, {
-          status: response.status,
-          headers: newResponseHeaders
-        });
+        return new Response(body, { status: response.status, headers: newResponseHeaders });
       }
 
       return response;
-
     } catch (e) {
-      return new Response("中継エラー: " + e.message, { status: 400 });
+      return new Response("Error: " + e.message);
     }
   }
 };
