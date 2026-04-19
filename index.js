@@ -4,39 +4,81 @@ export default {
     const originHost = url.host;
     const proxyPrefix = "/proxy/";
 
+    // 1. ターゲットURLの決定
     let targetUrlString = "";
     if (url.pathname.startsWith(proxyPrefix)) {
+      // 検索結果のリンクをクリックした時
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
-      // DuckDuckGoに戻す（ここならブロックされにくい）
-      targetUrlString = "https://duckduckgo.com" + url.pathname + url.search;
+      // 最初はBingを表示
+      targetUrlString = "https://www.bing.com" + url.pathname + url.search;
     }
 
     try {
       const targetUrl = new URL(targetUrlString);
+      const targetHost = targetUrl.host;
+
+      const newHeaders = new Headers(request.headers);
+      newHeaders.set('Host', targetHost);
+      newHeaders.set('Referer', `https://${targetHost}/`);
+      newHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
       const response = await fetch(new Request(targetUrl, {
         method: request.method,
-        headers: new Headers(request.headers),
+        headers: newHeaders,
+        body: request.body,
         redirect: 'manual'
       }));
 
-      let body = await response.text();
+      // 2. リダイレクト（転送）の書き換え
+      if ([301, 302, 307, 308].includes(response.status)) {
+        let location = response.headers.get('Location');
+        if (location) {
+          // 相対パスを絶対パスに変換
+          if (!location.startsWith('http')) {
+            location = new URL(location, targetUrl.origin).href;
+          }
+          const newLocation = `https://${originHost}${proxyPrefix}${location}`;
+          return new Response(null, {
+            status: response.status,
+            headers: { 'Location': newLocation }
+          });
+        }
+      }
+
       const contentType = response.headers.get('content-type') || '';
 
+      // 3. HTML内のリンクを自分のURLに「串刺し」にする
       if (contentType.includes('text/html')) {
-        // 全ての https:// を 自分のURL/proxy/https:// に変える魔法
-        body = body.replace(/https?:\/\/([a-zA-Z0-9.-]+)/g, (match) => {
+        let body = await response.text();
+
+        // ページ内の https://... をすべて自分経由に書き換え
+        body = body.replace(/href="https?:\/\/([^"]+)"/g, (match) => {
           if (match.includes(originHost)) return match;
-          return `https://${originHost}${proxyPrefix}${match}`;
+          const fullUrl = match.match(/https?:\/\/[^"]+/)[0];
+          return `href="https://${originHost}${proxyPrefix}${fullUrl}"`;
+        });
+
+        // Bing内の相対リンクも書き換え
+        body = body.replace(/href="\/([^"]+)"/g, (match, p1) => {
+          return `href="https://${originHost}${proxyPrefix}${targetUrl.origin}/${p1}"`;
+        });
+
+        const newResponseHeaders = new Headers(response.headers);
+        newResponseHeaders.delete('content-security-policy');
+        newResponseHeaders.delete('x-frame-options');
+        newResponseHeaders.set('Access-Control-Allow-Origin', '*');
+
+        return new Response(body, {
+          status: response.status,
+          headers: newResponseHeaders
         });
       }
 
-      return new Response(body, {
-        status: response.status,
-        headers: response.headers
-      });
+      return response;
+
     } catch (e) {
-      return new Response("Error: " + e.message);
+      return new Response("Bing Proxy Error: " + e.message, { status: 400 });
     }
   }
 };
