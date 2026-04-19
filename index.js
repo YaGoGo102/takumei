@@ -4,64 +4,66 @@ export default {
     const originHost = url.host;
     const proxyPrefix = "/proxy/";
 
+    // 1. ターゲットURLの決定
     let targetUrlString = "";
     if (url.pathname.startsWith(proxyPrefix)) {
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
+      // 初期値（Bing）
       targetUrlString = "https://www.bing.com" + url.pathname + url.search;
     }
 
     try {
       const targetUrl = new URL(targetUrlString);
+      const targetHost = targetUrl.host;
+
+      // 2. リクエストヘッダーの構築
+      const newHeaders = new Headers(request.headers);
+      newHeaders.set('Host', targetHost);
+      newHeaders.set('Referer', targetUrl.origin);
+
+      // --- セーフサーチOFFの強制注入 ---
+      let clientCookie = request.headers.get('Cookie') || '';
+      // 各検索エンジンのOFF設定クッキーを合体させる
+      const safeSearchOffCookies = "SRCHHPGUSR=ADLT=OFF; PREF=SAFEUI=0; mkt=ja-jp; safe=off";
+      newHeaders.set('Cookie', clientCookie ? `${clientCookie}; ${safeSearchOffCookies}` : safeSearchOffCookies);
+
       const response = await fetch(new Request(targetUrl, {
         method: request.method,
-        headers: new Headers(request.headers),
-        redirect: 'manual'
+        headers: newHeaders,
+        body: request.body,
+        redirect: 'manual' 
       }));
 
+      // 3. レスポンスヘッダー（クッキー）の自分のドメインへの書き換え
       const newResponseHeaders = new Headers(response.headers);
-      const contentType = response.headers.get('content-type') || '';
+      const setCookies = response.headers.getSetCookie(); // 全てのクッキーを取得
+      
+      newResponseHeaders.delete('set-cookie'); // 一度消して再構築
+      for (let cookie of setCookies) {
+        // クッキーの通用ドメインを「相手のドメイン」から「自分のドメイン」へ書き換え
+        let modifiedCookie = cookie.replace(new RegExp(targetHost, 'g'), originHost);
+        // セキュア設定などで弾かれないよう調整
+        modifiedCookie = modifiedCookie.replace(/Domain=[^;]+;?/i, ''); 
+        newResponseHeaders.append('set-cookie', modifiedCookie);
+      }
 
+      // 4. HTMLの書き換え（URL固定）
+      const contentType = response.headers.get('content-type') || '';
       if (contentType.includes('text/html')) {
         let body = await response.text();
 
-        // 【修正1】リンクの書き換え ＋ 新しいタブ禁止
-        // target="_blank" を target="_self"（同じタブ）に強制変更
+        // ページ内の絶対URLを自分経由に
         body = body.replace(/href="https?:\/\/([^"]+)"/g, (match) => {
           if (match.includes(originHost)) return match;
           const fullUrl = match.match(/https?:\/\/[^"]+/)[0];
-          return `href="https://${originHost}${proxyPrefix}${fullUrl}" target="_self"`;
+          return `href="https://${originHost}${proxyPrefix}${fullUrl}"`;
         });
 
-        // 【修正2】相対パスも同じタブで開くように強制
-        body = body.replace(/href="\/(?!\/)([^"]+)"/g, (match, p1) => {
-          return `href="https://${originHost}${proxyPrefix}${targetUrl.origin}/${p1}" target="_self"`;
-        });
+        // 相対パスを自分経由の絶対パスに
+        body = body.replace(/(href|src|action)="\/(?!\/)/g, `$1="https://${originHost}${proxyPrefix}${targetUrl.origin}/`);
 
-        // 【修正3】JavaScriptでの「新しいウィンドウ」を封じる
-        // ページの最後に、動作を上書きするスクリプトを流し込む
-        const injectionScript = `
-          <script>
-            // リンククリック時に新しいタブで開くのを阻止
-            document.addEventListener('click', function(e) {
-              const target = e.target.closest('a');
-              if (target && target.target === '_blank') {
-                target.target = '_self';
-              }
-            }, true);
-            // window.open を自分のプロキシ経由に書き換える
-            const originalOpen = window.open;
-            window.open = function(url, name, specs) {
-              if (url && !url.includes('${originHost}')) {
-                const proxyUrl = "https://${originHost}${proxyPrefix}" + new URL(url, window.location.href).href;
-                return originalOpen(proxyUrl, '_self', specs);
-              }
-              return originalOpen(url, '_self', specs);
-            };
-          </script>
-        `;
-        body = body.replace('</body>', injectionScript + '</body>');
-
+        // セキュリティ制限を解除
         newResponseHeaders.delete('content-security-policy');
         newResponseHeaders.delete('x-frame-options');
 
@@ -69,8 +71,9 @@ export default {
       }
 
       return response;
+
     } catch (e) {
-      return new Response("Error: " + e.message);
+      return new Response("プロキシエラー: " + e.message, { status: 400 });
     }
   }
 };
