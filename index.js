@@ -4,30 +4,22 @@ export default {
     const originHost = url.host;
     const proxyPrefix = "/proxy/";
 
-    // 1. ターゲットURLの決定
     let targetUrlString = "";
     if (url.pathname.startsWith(proxyPrefix)) {
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
-      // DuckDuckGoの日本地域・日本語・セーフサーチOFF設定
-      // kl=jp-jp (日本地域), kp=-2 (セーフサーチオフ)
-      targetUrlString = "https://duckduckgo.com/?kl=jp-jp&kp=-2";
+      // 初期値：日本設定のBing
+      targetUrlString = "https://www.bing.com/?setlang=ja&cc=JP&adlt=off";
     }
 
     try {
       const targetUrl = new URL(targetUrlString);
       const targetHost = targetUrl.host;
 
-      // 2. リクエストの構築（日本からのアクセスを偽装）
       const newHeaders = new Headers(request.headers);
       newHeaders.set('Host', targetHost);
-      newHeaders.set('Referer', 'https://duckduckgo.com/');
-      newHeaders.set('Accept-Language', 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7');
-      
-      // Cookieでの設定維持（DuckDuckGo用）
-      let cookie = request.headers.get('Cookie') || '';
-      const forceCookies = 'l=jp-jp; p=-2; ay=b;'; // 日本語設定とセーフサーチオフ
-      newHeaders.set('Cookie', cookie ? `${cookie}; ${forceCookies}` : forceCookies);
+      newHeaders.set('Referer', targetUrl.origin);
+      newHeaders.set('Accept-Language', 'ja-JP,ja;q=0.9');
 
       const response = await fetch(new Request(targetUrl, {
         method: request.method,
@@ -36,11 +28,11 @@ export default {
         redirect: 'manual' 
       }));
 
-      // 3. レスポンスヘッダーの加工（クッキー・リダイレクトのドメイン変換）
       const newResponseHeaders = new Headers(response.headers);
+      
+      // 1. Cookieの名義変更（認証維持とドメイン固定の鍵）
       const setCookies = response.headers.getSetCookie();
       newResponseHeaders.delete('set-cookie');
-      
       for (let c of setCookies) {
         let modified = c.replace(new RegExp(targetHost, 'g'), originHost)
                         .replace(/Domain=[^;]+;?/i, '')
@@ -48,24 +40,33 @@ export default {
         newResponseHeaders.append('set-cookie', modified);
       }
 
+      // 2. 強力なリダイレクト固定
       if ([301, 302, 307, 308].includes(response.status)) {
         const location = response.headers.get('Location');
         if (location) {
           const absoluteLoc = new URL(location, targetUrl.origin).href;
-          newResponseHeaders.set('Location', `https://${originHost}${proxyPrefix}${absoluteLoc}`);
+          return new Response(null, {
+            status: response.status,
+            headers: { 'Location': `https://${originHost}${proxyPrefix}${absoluteLoc}` }
+          });
         }
       }
 
-      // セキュリティ解除
+      // 3. セキュリティ解除（SNSログイン等の安定化）
       newResponseHeaders.delete('content-security-policy');
       newResponseHeaders.delete('x-frame-options');
+      newResponseHeaders.set('Access-Control-Allow-Origin', '*');
 
-      if (!response.headers.get('content-type')?.includes('text/html')) {
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('text/html')) {
         return new Response(response.body, { status: response.status, headers: newResponseHeaders });
       }
 
-      // 4. HTMLRewriterによる「Takumeiドメイン」への監禁
-      return new HTMLRewriter()
+      // 4. HTMLRewriter ＆ JavaScript注入による「URL完全固定」
+      let body = await response.text();
+      
+      // HTML内のタグを書き換え
+      const rewrittenBody = await new HTMLRewriter()
         .on('a, img, script, video, source, form, iframe', {
           element(el) {
             const attr = el.tagName === 'form' ? 'action' : (el.hasAttribute('href') ? 'href' : 'src');
@@ -76,14 +77,39 @@ export default {
                 el.setAttribute(attr, `https://${originHost}${proxyPrefix}${absolute}`);
               } catch(e) {}
             }
-            // 同じタブで開くことを強制
             if (el.tagName === 'a') el.setAttribute('target', '_self');
           }
         })
-        .transform(new Response(response.body, { status: response.status, headers: newResponseHeaders }));
+        .transform(new Response(body)).text();
+
+      // ブラウザ上での動的なURL変更を監視して強制修正するスクリプト
+      const finalScript = `
+        <script>
+          (function() {
+            const origin = "https://${originHost}${proxyPrefix}";
+            // 全てのクリックイベントをキャッチしてプロキシURLに変換
+            document.addEventListener('click', e => {
+              const a = e.target.closest('a');
+              if (a && a.href && !a.href.includes('${originHost}')) {
+                e.preventDefault();
+                window.location.href = origin + a.href;
+              }
+            }, true);
+            // JavaScriptによる window.open などを無効化
+            const oldOpen = window.open;
+            window.open = function(url) {
+              return oldOpen(url.startsWith('http') ? origin + url : url, '_self');
+            };
+          })();
+        </script>
+      `;
+
+      return new Response(rewrittenBody.replace('</body>', finalScript + '</body>'), {
+        headers: newResponseHeaders
+      });
 
     } catch (e) {
-      return new Response(`[takumei] Proxy Error: ${e.message}`, { status: 500 });
+      return new Response(`[takumei] System Error: ${e.message}`, { status: 500 });
     }
   }
 };
