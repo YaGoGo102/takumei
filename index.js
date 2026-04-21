@@ -9,23 +9,24 @@ export default {
     if (url.pathname.startsWith(proxyPrefix)) {
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
-      // 日本地域・日本語・セーフサーチOFFをパラメータで強制
-      targetUrlString = "https://www.bing.com/?setlang=ja&cc=JP&adlt=off";
+      // DuckDuckGoの日本地域・日本語・セーフサーチOFF設定
+      // kl=jp-jp (日本地域), kp=-2 (セーフサーチオフ)
+      targetUrlString = "https://duckduckgo.com/?kl=jp-jp&kp=-2";
     }
 
     try {
       const targetUrl = new URL(targetUrlString);
       const targetHost = targetUrl.host;
 
-      // 2. リクエストの構築（日本からのアクセスを完全に偽装）
+      // 2. リクエストの構築（日本からのアクセスを偽装）
       const newHeaders = new Headers(request.headers);
       newHeaders.set('Host', targetHost);
-      newHeaders.set('Referer', targetUrl.origin);
+      newHeaders.set('Referer', 'https://duckduckgo.com/');
       newHeaders.set('Accept-Language', 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7');
       
-      // Cookieの同期とセーフサーチ強制
+      // Cookieでの設定維持（DuckDuckGo用）
       let cookie = request.headers.get('Cookie') || '';
-      const forceCookies = 'SRCHHPGUSR=ADLT=OFF; PREF=SAFEUI=0; mkt=ja-jp;';
+      const forceCookies = 'l=jp-jp; p=-2; ay=b;'; // 日本語設定とセーフサーチオフ
       newHeaders.set('Cookie', cookie ? `${cookie}; ${forceCookies}` : forceCookies);
 
       const response = await fetch(new Request(targetUrl, {
@@ -35,20 +36,18 @@ export default {
         redirect: 'manual' 
       }));
 
-      // 3. レスポンスヘッダーの加工（クッキーのドメインを書き換え）
+      // 3. レスポンスヘッダーの加工（クッキー・リダイレクトのドメイン変換）
       const newResponseHeaders = new Headers(response.headers);
       const setCookies = response.headers.getSetCookie();
       newResponseHeaders.delete('set-cookie');
       
       for (let c of setCookies) {
-        // サイトのCookieをTakumeiドメインに紐付け、セキュリティ属性を緩和
         let modified = c.replace(new RegExp(targetHost, 'g'), originHost)
                         .replace(/Domain=[^;]+;?/i, '')
                         .replace(/SameSite=Lax|SameSite=Strict/i, 'SameSite=None; Secure');
         newResponseHeaders.append('set-cookie', modified);
       }
 
-      // リダイレクト先を絶対にTakumeiドメインに固定
       if ([301, 302, 307, 308].includes(response.status)) {
         const location = response.headers.get('Location');
         if (location) {
@@ -57,11 +56,9 @@ export default {
         }
       }
 
-      // セキュリティ解除（SNSのログイン画面を表示させるために必須）
+      // セキュリティ解除
       newResponseHeaders.delete('content-security-policy');
       newResponseHeaders.delete('x-frame-options');
-      newResponseHeaders.set('Access-Control-Allow-Origin', '*');
-      newResponseHeaders.set('Access-Control-Allow-Credentials', 'true');
 
       if (!response.headers.get('content-type')?.includes('text/html')) {
         return new Response(response.body, { status: response.status, headers: newResponseHeaders });
@@ -75,12 +72,11 @@ export default {
             let val = el.getAttribute(attr);
             if (val && !val.startsWith('data:') && !val.startsWith('#') && !val.includes(originHost)) {
               try {
-                // 相対パスを解決してプロキシ経由の絶対URLに置換
                 const absolute = new URL(val, targetUrl.origin).href;
                 el.setAttribute(attr, `https://${originHost}${proxyPrefix}${absolute}`);
               } catch(e) {}
             }
-            // 全てのリンクを「同じタブ（そのタブだけ）」で開かせる
+            // 同じタブで開くことを強制
             if (el.tagName === 'a') el.setAttribute('target', '_self');
           }
         })
