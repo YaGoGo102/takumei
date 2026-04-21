@@ -4,23 +4,23 @@ export default {
     const originHost = url.host;
     const proxyPrefix = "/proxy/";
 
-    // 1. 目的地を特定
     let targetUrlString = "";
     if (url.pathname.startsWith(proxyPrefix)) {
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
-      // 初期値：Bingの日本語設定
-      targetUrlString = "https://www.bing.com/?setlang=ja&cc=JP&adlt=off";
+      // 初期値（好きなサイトに変更可能）
+      targetUrlString = "https://www.bing.com" + url.pathname + url.search;
     }
 
     try {
       const targetUrl = new URL(targetUrlString);
       const targetHost = targetUrl.host;
 
-      // 2. 基本的なヘッダー設定
+      // 1. リクエストの構築（動画サイトはRefererとUser-Agentに厳しい）
       const newHeaders = new Headers(request.headers);
       newHeaders.set('Host', targetHost);
-      newHeaders.set('Referer', "https://" + targetHost + "/");
+      newHeaders.set('Referer', `https://${targetHost}/`);
+      newHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
       const response = await fetch(new Request(targetUrl, {
         method: request.method,
@@ -29,56 +29,56 @@ export default {
         redirect: 'manual' 
       }));
 
-      // 3. Cookieとリダイレクトの正常化
+      // 2. クッキーとリダイレクトの書き換え（前回の強化版を継承）
       const newResponseHeaders = new Headers(response.headers);
-      
-      // Cookieのドメインを自分のものに書き換え
       const setCookies = response.headers.getSetCookie();
       newResponseHeaders.delete('set-cookie');
-      for (let c of setCookies) {
-        let modified = c.replace(new RegExp(targetHost, 'g'), originHost)
-                        .replace(/Domain=[^;]+;?/i, '');
-        newResponseHeaders.append('set-cookie', modified);
+      for (let cookie of setCookies) {
+        let modifiedCookie = cookie.replace(new RegExp(targetHost, 'g'), originHost);
+        modifiedCookie = modifiedCookie.replace(/Domain=[^;]+;?/i, '');
+        newResponseHeaders.append('set-cookie', modifiedCookie);
       }
 
-      // リダイレクト先をプロキシURLに強制修正
       if ([301, 302, 307, 308].includes(response.status)) {
-        const location = response.headers.get('Location');
+        let location = response.headers.get('Location');
         if (location) {
           const absoluteLoc = new URL(location, targetUrl.origin).href;
-          newResponseHeaders.set('Location', "https://" + originHost + proxyPrefix + absoluteLoc);
+          newResponseHeaders.set('Location', `https://${originHost}${proxyPrefix}${absoluteLoc}`);
         }
       }
 
-      // セキュリティ制限（CSP/XFO）を削除して表示を許可
+      // 3. 動画再生を邪魔する制限（CSPやX-Frame-Options）を徹底的に消去
       newResponseHeaders.delete('content-security-policy');
+      newResponseHeaders.delete('content-security-policy-report-only');
       newResponseHeaders.delete('x-frame-options');
+      newResponseHeaders.delete('x-content-type-options');
+      // ブラウザに「これは安全だよ」と教え込む
+      newResponseHeaders.set('Access-Control-Allow-Origin', '*');
+      newResponseHeaders.set('Access-Control-Allow-Credentials', 'true');
 
-      // HTML以外はそのまま返す
       const contentType = response.headers.get('content-type') || '';
-      if (!contentType.includes('text/html')) {
-        return new Response(response.body, { status: response.status, headers: newResponseHeaders });
+
+      // 4. HTML / JS の置換処理
+      if (contentType.includes('text') || contentType.includes('javascript')) {
+        let body = await response.text();
+
+        // あらゆるURLをTakumeiドメイン経由に
+        body = body.replace(/https?:\/\/([a-zA-Z0-9.-]+\.[a-z]{2,})/g, (match) => {
+          if (match.includes(originHost)) return match;
+          return `https://${originHost}${proxyPrefix}${match}`;
+        });
+
+        // 相対パスの固定
+        body = body.replace(/(href|src|action|data-url)="\/(?!\/)/g, `$1="https://${originHost}${proxyPrefix}${targetUrl.origin}/`);
+
+        return new Response(body, { status: response.status, headers: newResponseHeaders });
       }
 
-      // 4. HTMLRewriterでタグのURLを書き換え
-      return new HTMLRewriter()
-        .on('a, form, img, script, iframe', {
-          element(el) {
-            const attr = el.tagName === 'form' ? 'action' : (el.hasAttribute('href') ? 'href' : 'src');
-            let val = el.getAttribute(attr);
-            if (val && !val.startsWith('data:') && !val.startsWith('#') && !val.includes(originHost)) {
-              try {
-                const absolute = new URL(val, targetUrl.origin).href;
-                el.setAttribute(attr, "https://" + originHost + proxyPrefix + absolute);
-              } catch(e) {}
-            }
-          }
-        })
-        .transform(new Response(response.body, { status: response.status, headers: newResponseHeaders }));
+      // 画像や動画ファイルなどはそのまま返す
+      return response;
 
     } catch (e) {
-      // ビルドエラー回避のためバッククォートを使わず出力
-      return new Response("Error: " + e.message, { status: 500 });
+      return new Response("中継エラー: " + e.message, { status: 500 });
     }
   }
 };
