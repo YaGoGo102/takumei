@@ -4,29 +4,24 @@ export default {
     const originHost = url.host;
     const proxyPrefix = "/proxy/";
 
-    // 1. 目的地の特定と解決
     let targetUrlString = "";
     if (url.pathname.startsWith(proxyPrefix)) {
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
-      // 初期値：日本地域、日本語、セーフサーチOFFをパラメータで強制
-      targetUrlString = "https://www.bing.com/?setlang=ja&cc=JP&adlt=off" + url.pathname + url.search;
+      // 検索エンジン側の地域・言語をより強力に固定
+      targetUrlString = "https://www.bing.com/search?q=&setlang=ja&cc=JP&adlt=off";
     }
 
     try {
       const targetUrl = new URL(targetUrlString);
       const targetHost = targetUrl.host;
 
-      // 2. リクエストヘッダーの構築（日本からのアクセスを完全に装う）
       const newHeaders = new Headers(request.headers);
       newHeaders.set('Host', targetHost);
-      newHeaders.set('Referer', targetUrl.origin);
-      newHeaders.set('Accept-Language', 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7');
-      
-      // クッキー認証 ＆ セーフサーチOFF
-      let cookie = request.headers.get('Cookie') || '';
-      const forceCookies = 'SRCHHPGUSR=ADLT=OFF; PREF=SAFEUI=0; mkt=ja-jp;';
-      newHeaders.set('Cookie', cookie ? `${cookie}; ${forceCookies}` : forceCookies);
+      // 検索ループを防ぐため、リファラをターゲットドメインに偽装
+      newHeaders.set('Referer', `https://${targetHost}/`);
+      newHeaders.set('Origin', `https://${targetHost}`);
+      newHeaders.set('Accept-Language', 'ja-JP,ja;q=0.9');
 
       const response = await fetch(new Request(targetUrl, {
         method: request.method,
@@ -35,11 +30,11 @@ export default {
         redirect: 'manual' 
       }));
 
-      // 3. レスポンスヘッダーの加工（ドメイン名義変更）
       const newResponseHeaders = new Headers(response.headers);
+      
+      // Cookieのドメイン書き換え（ここが外れると設定がリセットされます）
       const setCookies = response.headers.getSetCookie();
       newResponseHeaders.delete('set-cookie');
-      
       for (let c of setCookies) {
         let modified = c.replace(new RegExp(targetHost, 'g'), originHost)
                         .replace(/Domain=[^;]+;?/i, '')
@@ -47,30 +42,37 @@ export default {
         newResponseHeaders.append('set-cookie', modified);
       }
 
-      // リダイレクト先を絶対にTakumeiドメインに固定
+      // リダイレクトループを阻止し、必ずTakumeiドメインに繋ぐ
       if ([301, 302, 307, 308].includes(response.status)) {
         const location = response.headers.get('Location');
         if (location) {
           const absoluteLoc = new URL(location, targetUrl.origin).href;
-          newResponseHeaders.set('Location', `https://${originHost}${proxyPrefix}${absoluteLoc}`);
+          return new Response(null, {
+            status: response.status,
+            headers: { 'Location': `https://${originHost}${proxyPrefix}${absoluteLoc}` }
+          });
         }
       }
-
-      // セキュリティ解除
-      newResponseHeaders.delete('content-security-policy');
-      newResponseHeaders.delete('x-frame-options');
-      newResponseHeaders.set('Access-Control-Allow-Origin', '*');
 
       const contentType = response.headers.get('content-type') || '';
       if (!contentType.includes('text/html')) {
         return new Response(response.body, { status: response.status, headers: newResponseHeaders });
       }
 
-      // 4. HTMLRewriterによる高速タグ置換 ＆ JS注入
+      // HTMLの書き換え：フォームの「action（送信先）」を最優先で固定
       const rewriter = new HTMLRewriter()
-        .on('a, img, script, video, source, form, iframe', {
+        .on('form', {
           element(el) {
-            const attr = el.tagName === 'form' ? 'action' : (el.hasAttribute('href') ? 'href' : 'src');
+            const action = el.getAttribute('action');
+            if (action) {
+              const absolute = new URL(action, targetUrl.origin).href;
+              el.setAttribute('action', `https://${originHost}${proxyPrefix}${absolute}`);
+            }
+          }
+        })
+        .on('a, img, script, video, source, iframe', {
+          element(el) {
+            const attr = el.hasAttribute('href') ? 'href' : 'src';
             let val = el.getAttribute(attr);
             if (val && !val.startsWith('data:') && !val.startsWith('#') && !val.includes(originHost)) {
               try {
@@ -78,30 +80,6 @@ export default {
                 el.setAttribute(attr, `https://${originHost}${proxyPrefix}${absolute}`);
               } catch(e) {}
             }
-            if (el.tagName === 'a') el.setAttribute('target', '_self');
-          }
-        })
-        .on('head', {
-          element(el) {
-            // ブラウザ内でのURL脱走を監視するスクリプトを注入
-            el.append(`
-              <script>
-                (function() {
-                  const p = "https://${originHost}${proxyPrefix}";
-                  // 動的なリンククリックを監視
-                  document.addEventListener('click', e => {
-                    const a = e.target.closest('a');
-                    if (a && a.href && !a.href.includes('${originHost}')) {
-                      e.preventDefault();
-                      window.location.href = p + a.href;
-                    }
-                  }, true);
-                  // JavaScriptのURL変更をフック（一部）
-                  const oldOpen = window.open;
-                  window.open = function(u) { return oldOpen(u.startsWith('http') ? p + u : u, '_self'); };
-                })();
-              </script>
-            `, { html: true });
           }
         });
 
