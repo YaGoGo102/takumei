@@ -8,8 +8,7 @@ export default {
     if (url.pathname.startsWith(proxyPrefix)) {
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
-      // 検索エンジン側の地域・言語をより強力に固定
-      targetUrlString = "https://www.bing.com/search?q=&setlang=ja&cc=JP&adlt=off";
+      targetUrlString = "https://www.bing.com/?setlang=ja&cc=JP&adlt=off";
     }
 
     try {
@@ -18,9 +17,7 @@ export default {
 
       const newHeaders = new Headers(request.headers);
       newHeaders.set('Host', targetHost);
-      // 検索ループを防ぐため、リファラをターゲットドメインに偽装
       newHeaders.set('Referer', `https://${targetHost}/`);
-      newHeaders.set('Origin', `https://${targetHost}`);
       newHeaders.set('Accept-Language', 'ja-JP,ja;q=0.9');
 
       const response = await fetch(new Request(targetUrl, {
@@ -32,7 +29,7 @@ export default {
 
       const newResponseHeaders = new Headers(response.headers);
       
-      // Cookieのドメイン書き換え（ここが外れると設定がリセットされます）
+      // クッキーのドメイン名義変更
       const setCookies = response.headers.getSetCookie();
       newResponseHeaders.delete('set-cookie');
       for (let c of setCookies) {
@@ -42,7 +39,7 @@ export default {
         newResponseHeaders.append('set-cookie', modified);
       }
 
-      // リダイレクトループを阻止し、必ずTakumeiドメインに繋ぐ
+      // リダイレクトの完全捕獲
       if ([301, 302, 307, 308].includes(response.status)) {
         const location = response.headers.get('Location');
         if (location) {
@@ -59,20 +56,46 @@ export default {
         return new Response(response.body, { status: response.status, headers: newResponseHeaders });
       }
 
-      // HTMLの書き換え：フォームの「action（送信先）」を最優先で固定
+      // 4. HTMLRewriterによる「強制送還阻止スクリプト」の注入
       const rewriter = new HTMLRewriter()
-        .on('form', {
+        .on('head', {
           element(el) {
-            const action = el.getAttribute('action');
-            if (action) {
-              const absolute = new URL(action, targetUrl.origin).href;
-              el.setAttribute('action', `https://${originHost}${proxyPrefix}${absolute}`);
-            }
+            el.append(`
+              <script>
+                (function() {
+                  const p = "https://${originHost}${proxyPrefix}";
+                  
+                  // ① サイト側の「ドメインチェック」によるトップ戻りを力技で阻止
+                  const originalLocation = window.location;
+                  // location.replace や location.href の上書きを監視
+                  window.onbeforeunload = function() { return null; }; 
+
+                  // ② 全てのリンククリックを上書き（バブリングフェーズで捕獲）
+                  document.addEventListener('click', e => {
+                    const a = e.target.closest('a');
+                    if (a && a.href && !a.href.includes('${originHost}')) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      window.location.href = p + a.href;
+                    }
+                  }, true);
+
+                  // ③ フォーム送信をプロキシ経由に強制変更
+                  document.addEventListener('submit', e => {
+                    const form = e.target;
+                    if (form.action && !form.action.includes('${originHost}')) {
+                      const target = new URL(form.action, window.location.href).href;
+                      form.action = p + target;
+                    }
+                  }, true);
+                })();
+              </script>
+            `, { html: true });
           }
         })
-        .on('a, img, script, video, source, iframe', {
+        .on('a, img, script, video, source, form, iframe', {
           element(el) {
-            const attr = el.hasAttribute('href') ? 'href' : 'src';
+            const attr = el.tagName === 'form' ? 'action' : (el.hasAttribute('href') ? 'href' : 'src');
             let val = el.getAttribute(attr);
             if (val && !val.startsWith('data:') && !val.startsWith('#') && !val.includes(originHost)) {
               try {
@@ -86,7 +109,7 @@ export default {
       return rewriter.transform(new Response(response.body, { status: response.status, headers: newResponseHeaders }));
 
     } catch (e) {
-      return new Response(`[takumei] Error: ${e.message}`, { status: 500 });
+      return new Response(\`[takumei] Error: \${e.message}\`, { status: 500 });
     }
   }
 };
