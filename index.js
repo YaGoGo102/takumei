@@ -4,22 +4,29 @@ export default {
     const originHost = url.host;
     const proxyPrefix = "/proxy/";
 
+    // 1. 目的地の特定と解決
     let targetUrlString = "";
     if (url.pathname.startsWith(proxyPrefix)) {
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
-      // 初期値：日本設定のBing
-      targetUrlString = "https://www.bing.com/?setlang=ja&cc=JP&adlt=off";
+      // 初期値：日本地域、日本語、セーフサーチOFFをパラメータで強制
+      targetUrlString = "https://www.bing.com/?setlang=ja&cc=JP&adlt=off" + url.pathname + url.search;
     }
 
     try {
       const targetUrl = new URL(targetUrlString);
       const targetHost = targetUrl.host;
 
+      // 2. リクエストヘッダーの構築（日本からのアクセスを完全に装う）
       const newHeaders = new Headers(request.headers);
       newHeaders.set('Host', targetHost);
       newHeaders.set('Referer', targetUrl.origin);
-      newHeaders.set('Accept-Language', 'ja-JP,ja;q=0.9');
+      newHeaders.set('Accept-Language', 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7');
+      
+      // クッキー認証 ＆ セーフサーチOFF
+      let cookie = request.headers.get('Cookie') || '';
+      const forceCookies = 'SRCHHPGUSR=ADLT=OFF; PREF=SAFEUI=0; mkt=ja-jp;';
+      newHeaders.set('Cookie', cookie ? `${cookie}; ${forceCookies}` : forceCookies);
 
       const response = await fetch(new Request(targetUrl, {
         method: request.method,
@@ -28,11 +35,11 @@ export default {
         redirect: 'manual' 
       }));
 
+      // 3. レスポンスヘッダーの加工（ドメイン名義変更）
       const newResponseHeaders = new Headers(response.headers);
-      
-      // 1. Cookieの名義変更（認証維持とドメイン固定の鍵）
       const setCookies = response.headers.getSetCookie();
       newResponseHeaders.delete('set-cookie');
+      
       for (let c of setCookies) {
         let modified = c.replace(new RegExp(targetHost, 'g'), originHost)
                         .replace(/Domain=[^;]+;?/i, '')
@@ -40,19 +47,16 @@ export default {
         newResponseHeaders.append('set-cookie', modified);
       }
 
-      // 2. 強力なリダイレクト固定
+      // リダイレクト先を絶対にTakumeiドメインに固定
       if ([301, 302, 307, 308].includes(response.status)) {
         const location = response.headers.get('Location');
         if (location) {
           const absoluteLoc = new URL(location, targetUrl.origin).href;
-          return new Response(null, {
-            status: response.status,
-            headers: { 'Location': `https://${originHost}${proxyPrefix}${absoluteLoc}` }
-          });
+          newResponseHeaders.set('Location', `https://${originHost}${proxyPrefix}${absoluteLoc}`);
         }
       }
 
-      // 3. セキュリティ解除（SNSログイン等の安定化）
+      // セキュリティ解除
       newResponseHeaders.delete('content-security-policy');
       newResponseHeaders.delete('x-frame-options');
       newResponseHeaders.set('Access-Control-Allow-Origin', '*');
@@ -62,11 +66,8 @@ export default {
         return new Response(response.body, { status: response.status, headers: newResponseHeaders });
       }
 
-      // 4. HTMLRewriter ＆ JavaScript注入による「URL完全固定」
-      let body = await response.text();
-      
-      // HTML内のタグを書き換え
-      const rewrittenBody = await new HTMLRewriter()
+      // 4. HTMLRewriterによる高速タグ置換 ＆ JS注入
+      const rewriter = new HTMLRewriter()
         .on('a, img, script, video, source, form, iframe', {
           element(el) {
             const attr = el.tagName === 'form' ? 'action' : (el.hasAttribute('href') ? 'href' : 'src');
@@ -80,36 +81,34 @@ export default {
             if (el.tagName === 'a') el.setAttribute('target', '_self');
           }
         })
-        .transform(new Response(body)).text();
+        .on('head', {
+          element(el) {
+            // ブラウザ内でのURL脱走を監視するスクリプトを注入
+            el.append(`
+              <script>
+                (function() {
+                  const p = "https://${originHost}${proxyPrefix}";
+                  // 動的なリンククリックを監視
+                  document.addEventListener('click', e => {
+                    const a = e.target.closest('a');
+                    if (a && a.href && !a.href.includes('${originHost}')) {
+                      e.preventDefault();
+                      window.location.href = p + a.href;
+                    }
+                  }, true);
+                  // JavaScriptのURL変更をフック（一部）
+                  const oldOpen = window.open;
+                  window.open = function(u) { return oldOpen(u.startsWith('http') ? p + u : u, '_self'); };
+                })();
+              </script>
+            `, { html: true });
+          }
+        });
 
-      // ブラウザ上での動的なURL変更を監視して強制修正するスクリプト
-      const finalScript = `
-        <script>
-          (function() {
-            const origin = "https://${originHost}${proxyPrefix}";
-            // 全てのクリックイベントをキャッチしてプロキシURLに変換
-            document.addEventListener('click', e => {
-              const a = e.target.closest('a');
-              if (a && a.href && !a.href.includes('${originHost}')) {
-                e.preventDefault();
-                window.location.href = origin + a.href;
-              }
-            }, true);
-            // JavaScriptによる window.open などを無効化
-            const oldOpen = window.open;
-            window.open = function(url) {
-              return oldOpen(url.startsWith('http') ? origin + url : url, '_self');
-            };
-          })();
-        </script>
-      `;
-
-      return new Response(rewrittenBody.replace('</body>', finalScript + '</body>'), {
-        headers: newResponseHeaders
-      });
+      return rewriter.transform(new Response(response.body, { status: response.status, headers: newResponseHeaders }));
 
     } catch (e) {
-      return new Response(`[takumei] System Error: ${e.message}`, { status: 500 });
+      return new Response(`[takumei] Error: ${e.message}`, { status: 500 });
     }
   }
 };
