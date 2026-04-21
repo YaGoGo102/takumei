@@ -8,7 +8,6 @@ export default {
     if (url.pathname.startsWith(proxyPrefix)) {
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
-      // 検索ループを防ぐため、最初から日本語設定のBingへ誘導
       targetUrlString = "https://www.bing.com/?setlang=ja&cc=JP&adlt=off";
     }
 
@@ -18,7 +17,7 @@ export default {
 
       const newHeaders = new Headers(request.headers);
       newHeaders.set('Host', targetHost);
-      newHeaders.set('Referer', `https://${targetHost}/`);
+      newHeaders.set('Referer', "https://" + targetHost + "/");
       newHeaders.set('Accept-Language', 'ja-JP,ja;q=0.9');
 
       const response = await fetch(new Request(targetUrl, {
@@ -29,8 +28,6 @@ export default {
       }));
 
       const newResponseHeaders = new Headers(response.headers);
-      
-      // Cookieの名義変更
       const setCookies = response.headers.getSetCookie();
       newResponseHeaders.delete('set-cookie');
       for (let c of setCookies) {
@@ -40,75 +37,58 @@ export default {
         newResponseHeaders.append('set-cookie', modified);
       }
 
-      // リダイレクトの完全捕獲
       if ([301, 302, 307, 308].includes(response.status)) {
         const location = response.headers.get('Location');
         if (location) {
           const absoluteLoc = new URL(location, targetUrl.origin).href;
-          return new Response(null, {
-            status: response.status,
-            headers: { 'Location': `https://${originHost}${proxyPrefix}${absoluteLoc}` }
-          });
+          newResponseHeaders.set('Location', "https://" + originHost + proxyPrefix + absoluteLoc);
         }
       }
 
       newResponseHeaders.delete('content-security-policy');
       newResponseHeaders.delete('x-frame-options');
-      newResponseHeaders.set('Access-Control-Allow-Origin', '*');
 
       const contentType = response.headers.get('content-type') || '';
       if (!contentType.includes('text/html')) {
         return new Response(response.body, { status: response.status, headers: newResponseHeaders });
       }
 
-      // HTMLRewriterによる処理
+      // --- 改良ポイント：非破壊的な書き換え ---
       return new HTMLRewriter()
-        .on('head', {
+        .on('a, form, iframe', { // 表示に影響しにくい「遷移系」のみを優先
           element(el) {
-            // サイトの消滅を防ぐため、実行タイミングを調整した守護神スクリプト
-            el.append(`
-              <script>
-                window.addEventListener('DOMContentLoaded', () => {
-                  const p = "https://${originHost}${proxyPrefix}";
-                  
-                  // リンククリックの奪取
-                  document.addEventListener('click', e => {
-                    const a = e.target.closest('a');
-                    if (a && a.href && !a.href.includes('${originHost}')) {
-                      e.preventDefault();
-                      window.location.href = p + a.href;
-                    }
-                  }, true);
-
-                  // フォーム送信の奪取
-                  document.addEventListener('submit', e => {
-                    const form = e.target;
-                    if (form.action && !form.action.includes('${originHost}')) {
-                      const target = new URL(form.action, window.location.href).href;
-                      form.action = p + target;
-                    }
-                  }, true);
-                });
-              </script>
-            `, { html: true });
-          }
-        })
-        .on('a, img, script, video, source, form, iframe', {
-          element(el) {
-            const attr = el.tagName === 'form' ? 'action' : (el.hasAttribute('href') ? 'href' : 'src');
+            const attr = el.tagName === 'form' ? 'action' : 'href';
             let val = el.getAttribute(attr);
             if (val && !val.startsWith('data:') && !val.startsWith('#') && !val.includes(originHost)) {
               try {
                 const absolute = new URL(val, targetUrl.origin).href;
-                el.setAttribute(attr, `https://${originHost}${proxyPrefix}${absolute}`);
+                el.setAttribute(attr, "https://" + originHost + proxyPrefix + absolute);
               } catch(e) {}
             }
+          }
+        })
+        .on('head', {
+          element(el) {
+            // 安全な文字列連結でスクリプトを注入
+            const scriptStr = '<script>' +
+              'window.addEventListener("load", function() {' +
+              '  var p = "https://' + originHost + proxyPrefix + '";' +
+              '  document.addEventListener("click", function(e) {' +
+              '    var a = e.target.closest("a");' +
+              '    if (a && a.href && !a.href.includes("' + originHost + '")) {' +
+              '      e.preventDefault();' +
+              '      window.location.href = p + a.href;' +
+              '    }' +
+              '  }, true);' +
+              '});' +
+              '</script>';
+            el.append(scriptStr, { html: true });
           }
         })
         .transform(new Response(response.body, { status: response.status, headers: newResponseHeaders }));
 
     } catch (e) {
-      // エラー時のレスポンスを修正
+      // バッククォートを排除したエラーレスポンス
       return new Response("[takumei] Error: " + e.message, { status: 500 });
     }
   }
