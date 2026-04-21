@@ -8,19 +8,24 @@ export default {
     if (url.pathname.startsWith(proxyPrefix)) {
       targetUrlString = url.pathname.slice(proxyPrefix.length) + url.search;
     } else {
-      // 初期値（好きなサイトに変更可能）
+      // 初期値：日本地域設定とセーフサーチOFFをパラメータで強制
       targetUrlString = "https://www.bing.com" + url.pathname + url.search;
+      if (url.pathname === "/") {
+        targetUrlString = "https://www.bing.com/?setlang=ja&cc=JP&adlt=off";
+      }
     }
 
     try {
       const targetUrl = new URL(targetUrlString);
       const targetHost = targetUrl.host;
 
-      // 1. リクエストの構築（動画サイトはRefererとUser-Agentに厳しい）
       const newHeaders = new Headers(request.headers);
       newHeaders.set('Host', targetHost);
-      newHeaders.set('Referer', `https://${targetHost}/`);
+      newHeaders.set('Referer', "https://" + targetHost + "/");
       newHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+      
+      // 日本語環境を優先するヘッダーを追加
+      newHeaders.set('Accept-Language', 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7');
 
       const response = await fetch(new Request(targetUrl, {
         method: request.method,
@@ -29,13 +34,15 @@ export default {
         redirect: 'manual' 
       }));
 
-      // 2. クッキーとリダイレクトの書き換え（前回の強化版を継承）
       const newResponseHeaders = new Headers(response.headers);
       const setCookies = response.headers.getSetCookie();
       newResponseHeaders.delete('set-cookie');
+      
       for (let cookie of setCookies) {
-        let modifiedCookie = cookie.replace(new RegExp(targetHost, 'g'), originHost);
-        modifiedCookie = modifiedCookie.replace(/Domain=[^;]+;?/i, '');
+        // SNSログインに不可欠なSameSite属性の調整
+        let modifiedCookie = cookie.replace(new RegExp(targetHost, 'g'), originHost)
+                                   .replace(/Domain=[^;]+;?/i, '')
+                                   .replace(/SameSite=Lax|SameSite=Strict/i, 'SameSite=None; Secure');
         newResponseHeaders.append('set-cookie', modifiedCookie);
       }
 
@@ -43,38 +50,36 @@ export default {
         let location = response.headers.get('Location');
         if (location) {
           const absoluteLoc = new URL(location, targetUrl.origin).href;
-          newResponseHeaders.set('Location', `https://${originHost}${proxyPrefix}${absoluteLoc}`);
+          newResponseHeaders.set('Location', "https://" + originHost + proxyPrefix + absoluteLoc);
         }
       }
 
-      // 3. 動画再生を邪魔する制限（CSPやX-Frame-Options）を徹底的に消去
+      // セキュリティヘッダー削除
       newResponseHeaders.delete('content-security-policy');
       newResponseHeaders.delete('content-security-policy-report-only');
       newResponseHeaders.delete('x-frame-options');
       newResponseHeaders.delete('x-content-type-options');
-      // ブラウザに「これは安全だよ」と教え込む
+      
       newResponseHeaders.set('Access-Control-Allow-Origin', '*');
       newResponseHeaders.set('Access-Control-Allow-Credentials', 'true');
 
       const contentType = response.headers.get('content-type') || '';
 
-      // 4. HTML / JS の置換処理
-      if (contentType.includes('text') || contentType.includes('javascript')) {
+      if (contentType.includes('text/html') || contentType.includes('javascript')) {
         let body = await response.text();
 
-        // あらゆるURLをTakumeiドメイン経由に
+        // URL置換（Takumeiドメイン経由）
         body = body.replace(/https?:\/\/([a-zA-Z0-9.-]+\.[a-z]{2,})/g, (match) => {
           if (match.includes(originHost)) return match;
-          return `https://${originHost}${proxyPrefix}${match}`;
+          return "https://" + originHost + proxyPrefix + match;
         });
 
-        // 相対パスの固定
-        body = body.replace(/(href|src|action|data-url)="\/(?!\/)/g, `$1="https://${originHost}${proxyPrefix}${targetUrl.origin}/`);
+        // 相対パス固定
+        body = body.replace(/(href|src|action|data-url)="\/(?!\/)/g, "$1=\"https://" + originHost + proxyPrefix + targetUrl.origin + "/");
 
         return new Response(body, { status: response.status, headers: newResponseHeaders });
       }
 
-      // 画像や動画ファイルなどはそのまま返す
       return response;
 
     } catch (e) {
